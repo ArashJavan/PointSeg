@@ -1,0 +1,15 @@
+input-shape: [64, 512, 5]
+classes: ['unknown', 'car', 'pedestrian', 'cyclist']
+class-weights: [0.06, 1.0,  10.0, 10.0,]
+class-cmap: [[0., 0., 0.],
+             [0., 0., 0.9],
+             [0., 0.9, 0.],
+             [0.9, 0., 0.]]
+
+azimuth-level: 512
+zenith-level: 64
+data-augmentation: true
+random-flipping: true
+class-loss-coef: 15
+mean: [10.88, 0.23, -1.04, 0.21, 12.12, 0., 0., 0.]
+std: [11.47, 6.91, 0.86, 0.16, 12.32, 1., 1., 1.]
