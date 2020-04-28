@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import random
 import warnings
@@ -15,7 +16,10 @@ import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 
-from pytorch_model_summary import summary
+dname = os.path.abspath(os.path.dirname(__file__))
+content_dir = os.path.abspath("{}/..".format(dname))
+sys.path.append(dname)
+sys.path.append(content_dir)
 
 from pointseg.pointseg_net import PointSegNet
 from pointseg.kitti_squeezeseg_ds import KittiSqueezeSegDS
@@ -60,11 +64,9 @@ def main_worker(args):
     model = PointSegNet(cfg, bypass=False)
     model.to(args.device)
 
-    inputs = torch.randn((1, input_shape[2], input_shape[0], input_shape[1])).to(args.device)
-    print(summary(model, inputs))
-
     criterion = WeightedCrossEntropy(cfg)
-    optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -98,14 +100,17 @@ def main_worker(args):
 
     writer = SummaryWriter()
 
+    print("Starting PointSeg v{}.{}.{}".format(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH))
+
     if args.evaluate:
         validate(val_dataloader, model, criterion, args)
         return
 
+    print("Starting trainig")
+    print("lr: {}, batch-size: {}, num-workers: {}".format(args.lr, args.batch_size, args.workers))
+
     for epoch in range(args.start_epoch, args.epochs):
-        lr = adjust_learning_rate(optimizer, epoch, args)
-        # recore learning rate changes
-        writer.add_scalar("LR", lr, epoch)
+        # lr = adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
         train(train_dataloader, model, criterion, optimizer, epoch, args)
@@ -126,6 +131,10 @@ def main_worker(args):
             'best_acc': best_acc,
             'optimizer': optimizer.state_dict(),
         }, is_best, fname)
+
+        lr_scheduler.step(epoch)
+        # recore learning rate changes
+        writer.add_scalar("LR", lr_scheduler.get_lr()[0], epoch)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -287,7 +296,6 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
 
 
 best_acc = 0

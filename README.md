@@ -21,7 +21,9 @@ The dataset used for training pointsge is the same as [squeezeseg](https://githu
 ## Usage 
 Example:
 
-> python --csv-path ImageSet/csv/ --data-path /path/to/Datasets/lidar_2d/ -c ./config.yaml -b 32 --lr 0.001
+> ~ cd PointSeg
+>
+> ~ python --csv-path ImageSet/csv/ --data-path /path/to/Datasets/lidar_2d/ -c ./config.yaml -b 32 --lr 0.001
 
 ## Netwrok Architecture
 

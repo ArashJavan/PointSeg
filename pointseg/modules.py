@@ -48,7 +48,7 @@ class ASPP(nn.Module):
             nn.Conv2d(5 * out_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
-            nn.Dropout(0.5))
+            nn.Dropout(0.25))
 
     def forward(self, x):
         res = []
@@ -60,7 +60,7 @@ class ASPP(nn.Module):
 
 class Conv2d(nn.Module):
     """A 2D Convolution Block"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, activation='relu', bn=False, **kwargs):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, activation='relu', bn=True, **kwargs):
         super(Conv2d, self).__init__()
 
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
@@ -178,7 +178,7 @@ class SELayer(nn.Module):
         self.fc2 = nn.Linear(h_features, in_features)
 
     def forward(self, x):
-        z = x.mean(2).mean(2)  # equiv. F.adaptive_avg_pool2d(x, 1)
+        z = F.adaptive_avg_pool2d(x, 1).squeeze()
         s = self.fc1(z)
         s = torch.relu(s)
         s = self.fc2(s)
