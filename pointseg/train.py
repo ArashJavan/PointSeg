@@ -220,9 +220,9 @@ def validate(val_loader, model, criterion, epoch, args):
             n_classes = inputs.size(1)
             tp, fp, fn = cal_eval_metrics(labels, predicted, n_classes)
 
-            iou_i = tp / (tp + fn + fp + 1e-12)
-            precision_i = tp / (tp + fp + 1e-16)
-            reccall_i = tp / (tp + fn + 1e-16)
+            iou_i = tp / (tp + fn + fp + 1e-6)
+            precision_i = tp / (tp + fp + 1e-6)
+            reccall_i = tp / (tp + fn + 1e-6)
 
             losses.update(loss.item(), inputs.size(0))
             iou.update(iou_i.mean().item(), 1)
