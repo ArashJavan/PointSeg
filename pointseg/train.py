@@ -66,7 +66,7 @@ def main_worker(args):
 
     criterion = WeightedCrossEntropy(cfg)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     # optionally resume from a checkpoint
     if args.resume:
