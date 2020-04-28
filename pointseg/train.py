@@ -6,6 +6,7 @@ import yaml
 import time
 import shutil
 import datetime
+from pathlib import Path
 
 import torch
 import torch.optim
@@ -18,8 +19,13 @@ from pytorch_model_summary import summary
 
 from pointseg.pointseg_net import PointSegNet
 from pointseg.kitti_squeezeseg_ds import KittiSqueezeSegDS
-from pointseg.loss import WeightedCrossEntropy, evaluate
+from pointseg.loss import WeightedCrossEntropy, cal_eval_metrics
 from pointseg.utils import img_normalize, visualize_seg
+
+
+VERSION_MAJOR = 0
+VERSION_MINOR = 1
+VERSION_PATCH = 0
 
 
 def main(args):
@@ -68,8 +74,7 @@ def main_worker(args):
             checkpoint = torch.load(args.resume, map_location=args.device)
 
             args.start_epoch = checkpoint['epoch']
-            best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.to(args.device)
+            best_acc = checkpoint['best_acc']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
@@ -98,26 +103,29 @@ def main_worker(args):
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        # adjust_learning_rate(optimizer, epoch, args)
+        lr = adjust_learning_rate(optimizer, epoch, args)
+        # recore learning rate changes
+        writer.add_scalar("LR", lr, epoch)
 
         # train for one epoch
         train(train_dataloader, model, criterion, optimizer, epoch, args)
 
         # evaluate on validation set
-        acc = validate(val_dataloader, model, criterion, args)
+        acc = validate(val_dataloader, model, criterion, epoch, args)
 
         # evaluate on validation set
-        is_best = acc > best_acc1
-        best_acc1 = max(acc, best_acc1)
+        is_best = acc > best_acc
+        best_acc = max(acc, best_acc)
 
-        fname = os.path.join(content_dir, "../{}_{}.tar".format(epoch, datetime.datetime.now().strftime("%Y%m%d_%H%M%S")))
+        chk_path = Path(os.path.join(content_dir, "checkpoints"))
+        chk_path.mkdir(parents=True, exist_ok=True)
+        fname = "{}/checkpoint_{}_{}.tar".format(str(chk_path), epoch, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
         save_checkpoint({
             'epoch': epoch + 1,
-            'arch': args.arch,
             'state_dict': model.state_dict(),
-            'best_acc1': best_acc1,
+            'best_acc': best_acc,
             'optimizer': optimizer.state_dict(),
-        }, is_best)
+        }, is_best, fname)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -133,7 +141,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
-    for i, data in enumerate(train_loader):
+    for i, data in enumerate(train_loader, 1):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -148,7 +156,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         # Record loss
         losses.update(loss.item(), inputs.size(0))
-        writer.add_scalar("Train/Loss", loss.detach().cpu() / inputs.size(0), i * epoch)
 
         # compute gradient and step optimizer
         optimizer.zero_grad()
@@ -161,23 +168,27 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
-            # TensoorboardX Save Input Image and Visualized Segmentation
-            writer.add_image('Input/Image/', (img_normalize(inputs[0, 3, :, :])).cpu(), i * epoch)
 
-            writer.add_image('Predict/Image/', visualize_seg(preds, cfg)[0], i * epoch)
+            step_val = epoch * len(train_loader) + i
+            writer.add_scalar("Train/Loss", losses.avg, step_val)
 
-            writer.add_image('Target/Image/', visualize_seg(labels, cfg)[0], i * epoch)
+            # Tensoorboard Save Input Image and Visualized Segmentation
+            writer.add_image('Input/Image/', (img_normalize(inputs[0, 3, :, :])).cpu(), step_val)
+
+            writer.add_image('Predict/Image/', visualize_seg(preds, cfg)[0], step_val)
+
+            writer.add_image('Target/Image/', visualize_seg(labels, cfg)[0], step_val)
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
-    iou_loss = AverageMeter('iou', ':.4e')
+    iou = AverageMeter('iou', ':.4e')
     precision = AverageMeter('prec', ':.4e')
     recall = AverageMeter('recall', ':.4e')
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, iou_loss, precision, recall],
+        [batch_time, losses, iou, precision, recall],
         prefix='Test: ')
 
     # switch to evaluate mode
@@ -185,7 +196,7 @@ def validate(val_loader, model, criterion, args):
 
     with torch.no_grad():
         end = time.time()
-        for i, data in enumerate(val_loader):
+        for i, data in enumerate(val_loader, 1):
             inputs, mask, labels, weights = data
             inputs, mask, labels, weights = \
                 inputs.to(args.device), mask.to(args.device), labels.to(args.device), weights.to(args.device)
@@ -198,15 +209,20 @@ def validate(val_loader, model, criterion, args):
             _, predicted = torch.max(outputs.data, 1)
 
             n_classes = inputs.size(1)
-            tp, fp, fn = evaluate(labels, predicted, n_classes)
+            tp, fp, fn = cal_eval_metrics(labels, predicted, n_classes)
 
-            iou = tp / (tp + fn + fp + 1e-12)
-            prec = tp / (tp + fp + 1e-16)
-            recall = tp / (tp + fn + 1e-16)
+            iou_i = tp / (tp + fn + fp + 1e-12)
+            precision_i = tp / (tp + fp + 1e-16)
+            reccall_i = tp / (tp + fn + 1e-16)
 
             losses.update(loss.item(), inputs.size(0))
-            iou.update(iou, inputs.size(0))
-            prec.update(prec, inputs.size(0))
+            iou.update(iou_i.mean().item(), 1)
+            precision.update(precision_i.mean().item(), 1)
+            recall.update(reccall_i.mean().item(), 1)
+
+            # Record loss
+            step_val = epoch * len(val_loader) + i
+            writer.add_scalar("Val/Loss", losses.avg, step_val)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -217,18 +233,19 @@ def validate(val_loader, model, criterion, args):
     return iou.avg
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, filename='checkpoint.tar'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
-
+        shutil.copyfile(filename, '{}/model_best.tar'.format(os.path.dirname(filename)))
 
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = args.lr * (0.1 ** (epoch // 30))
+    lr = max(args.lr * (0.1 ** (epoch // 20)), 1e-6)
+
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    return lr
 
 
 class AverageMeter(object):
@@ -273,7 +290,7 @@ class ProgressMeter(object):
 
 
 
-best_acc1 = 0
+best_acc = 0
 args = None
 writer = None
 cfg = None
@@ -285,7 +302,7 @@ if __name__ == "__main__":
     parser.add_argument('-c', '--config', default='../config.yaml', type=str, help='path to config file')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('--epochs', default=90, type=int, metavar='N',
+    parser.add_argument('--epochs', default=30, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='manual epoch number (useful on restarts)')
@@ -307,12 +324,11 @@ if __name__ == "__main__":
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                         help='evaluate model on validation set')
-    parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                        help='use pre-trained model')
     parser.add_argument('--device', default='cpu', type=str, metavar='DEVICE',
                         help='Device to use [cpu, cuda].')
     parser.add_argument('--seed', default=None, type=int,
                         help='seed for initializing training. ')
+    parser.add_argument('--version', action='version', version='{}.{}.{}'.format(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH))
 
     args = parser.parse_args()
     main(args)

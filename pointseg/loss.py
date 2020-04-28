@@ -2,9 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
 
-def evaluate(label, pred, n_class):
+def cal_eval_metrics(label, pred, n_class):
     """Evaluation script to compute pixel level IoU.
     Args:
         label: N-d array of shape [batch, W, H], where each element is a class index.
@@ -21,17 +20,17 @@ def evaluate(label, pred, n_class):
     assert label.shape == pred.shape, \
         'label and pred shape mismatch: {} vs {}'.format(label.shape, pred.shape)
 
-    label = label.cpu().numpy()
-    pred = pred.cpu().numpy()
+    #label = label.cpu().numpy()
+    #pred = pred.cpu().numpy()
 
-    tp = np.zeros(n_class)
-    fn = np.zeros(n_class)
-    fp = np.zeros(n_class)
+    tp = torch.zeros(n_class) # np.zeros(n_class)
+    fn = torch.zeros(n_class)
+    fp = torch.zeros(n_class)
 
     for cls_id in range(n_class):
-        tp_cls = np.sum(pred[label == cls_id] == cls_id)
-        fp_cls = np.sum(label[pred == cls_id] != cls_id)
-        fn_cls = np.sum(pred[label == cls_id] != cls_id)
+        tp_cls = torch.sum(pred[label == cls_id] == cls_id)
+        fp_cls = torch.sum(label[pred == cls_id] != cls_id)
+        fn_cls = torch.sum(pred[label == cls_id] != cls_id)
 
         tp[cls_id] = tp_cls
         fp[cls_id] = fp_cls
