@@ -26,6 +26,7 @@ from pointseg.kitti_squeezeseg_ds import KittiSqueezeSegDS
 from pointseg.loss import WeightedCrossEntropy, cal_eval_metrics
 from pointseg.utils import img_normalize, visualize_seg
 
+from pytorch_model_summary import summary
 
 VERSION_MAJOR = 0
 VERSION_MINOR = 1
@@ -99,6 +100,9 @@ def main_worker(args):
                                                    num_workers=args.workers, shuffle=False)
 
     writer = SummaryWriter()
+    input = torch.rand((1, input_shape[2], input_shape[0], input_shape[1])).to(args.device)
+    print(summary(model, input))
+    writer.add_graph(model, input)
 
     print("Starting PointSeg v{}.{}.{}".format(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH))
 
@@ -342,3 +346,4 @@ if __name__ == "__main__":
     main(args)
 
 
+torch.optim.lr_scheduler.ExponentialLR

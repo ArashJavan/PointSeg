@@ -13,11 +13,12 @@ def visualize_seg(label_map, cfg, one_hot=False):
     n_cls = len(cfg['classes'])
 
     if one_hot:
-        label_map = np.argmax(label_map, axis=-1)
+        label_map = torch.argmax(label_map, axis=-1)
 
-    out = torch.zeros([label_map.size()[0], label_map.size()[1], label_map.size()[2], 3], dtype=torch.float64)
+    out = torch.zeros([label_map.size(0), label_map.size(1), label_map.size(2), 3])
 
     for l in range(1, n_cls):
-        out[label_map==l, :] = torch.from_numpy(cmap[l])
+        out[label_map == l, :] = torch.from_numpy(cmap[l]).type(torch.float32)
 
-    return out.transpose(2,3).transpose(1,2)
+    out = out.permute(0, 3, 1, 2)
+    return out

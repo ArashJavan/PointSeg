@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
         modules = [
@@ -58,12 +59,39 @@ class ASPP(nn.Module):
         return self.project(res)
 
 
-class Conv2d(nn.Module):
+class BaseBlk(nn.Module):
+    def __init__(self, init='kaiming'):
+        super(BaseBlk, self).__init__()
+
+        self.init = init
+
+    def reset_parameters(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.ConvTranspose2d):
+                self.init_module(module)
+
+    def init_module(self, module):
+        # Pytorch does kaiming initialiaztion at the moment, so do not need to inititliaze again.
+        if 'kaiming' in self.init:
+            return
+
+        init_method = init_methods[self.init]
+        init_method(module.weight)
+        if module.bias is not None:
+            torch.nn.init.zeros_(module.bias)
+
+
+class Conv2dBlk(BaseBlk):
     """A 2D Convolution Block"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, activation='relu', bn=True, **kwargs):
-        super(Conv2d, self).__init__()
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0,
+                 activation='relu', bn=True, init='xavier-normal',**kwargs):
+        super(Conv2dBlk, self).__init__(init)
 
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
+
+        self.bn = None
+        if bn:
+            self.bn = nn.BatchNorm2d(out_channels)
 
         self.activation = None
         if activation:
@@ -75,27 +103,25 @@ class Conv2d(nn.Module):
             elif activation.lower() == 'leakrelu':
                 negative_slope = kwargs.get('negative_slope', 0.01)
                 self.activation = nn.LeakyReLU(negative_slope=negative_slope, inplace=True)
-
-        self.bn = None
-        if bn:
-            self.bn = nn.BatchNorm2d(out_channels)
+        self.reset_parameters()
 
     def forward(self, x):
         x = self.conv(x)
 
-        if self.bn:
+        if self.bn is not None:
             x = self.bn(x)
 
-        if self.activation:
+        if self.activation is not None:
             x = self.activation(x)
         return x
 
 
-class Deconv2d( nn.Module ):
+class Deconv2dBlk(BaseBlk):
     """ A 2D Deconvolution Block"""
-    def __init__( self, inputs, outputs, kernel_size, stride, padding=0, activation='relu', **kwargs):
-        super(Deconv2d, self).__init__()
-        self.deconv = nn.ConvTranspose2d(inputs, outputs, kernel_size=kernel_size, stride=stride, padding=padding)
+    def __init__( self, in_channels, out_channels, kernel_size, stride, padding=0, activation='relu', init='kaiming', **kwargs):
+        super(Deconv2dBlk, self).__init__(init)
+
+        self.deconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
 
         if activation == 'relu':
             self.activation = nn.ReLU(inplace=True)
@@ -107,6 +133,7 @@ class Deconv2d( nn.Module ):
             self.activation = nn.LeakyReLU(negative_slope=negative_slope, inplace=True)
         else:
             self.activation = None
+        self.reset_parameters()
 
     def forward(self, x):
         x = self.deconv(x)
@@ -121,9 +148,9 @@ class Fire(nn.Module):
         super(Fire, self).__init__()
         self.inplanes = inplanes
 
-        self.squeeze = Conv2d(inplanes, squeeze_planes, kernel_size=1)
-        self.expand1x1 = Conv2d(squeeze_planes, expand1x1_planes, kernel_size=1)
-        self.expand3x3 = Conv2d(squeeze_planes, expand3x3_planes, kernel_size=3, padding=1)
+        self.squeeze = Conv2dBlk(inplanes, squeeze_planes, kernel_size=1, stride=1, bn=False)
+        self.expand1x1 = Conv2dBlk(squeeze_planes, expand1x1_planes, kernel_size=1, stride=1, bn=False)
+        self.expand3x3 = Conv2dBlk(squeeze_planes, expand3x3_planes, kernel_size=3, padding=1, stride=1, bn=False)
 
     def forward(self, x):
         x = self.squeeze(x)
@@ -150,12 +177,11 @@ class FireDeconv(nn.Module):
         ksize_h = factors[0] * 2 - factors[0] % 2
         ksize_w = factors[1] * 2 - factors[1] % 2
 
-        self.squeeze = Conv2d(in_channels, squeeze_planes, 1, (1, 1), 0)
-        self.squeeze_deconv = Deconv2d(squeeze_planes, squeeze_planes, (ksize_h, ksize_w),
-                                                 (factors[0], factors[1]), padding)
-
-        self.expand1x1 = Conv2d(squeeze_planes, expand1x1_planes, 1, (1, 1), 0)
-        self.expand3x3 = Conv2d(squeeze_planes, expand3x3_planes, 3, (1, 1), 1)
+        self.squeeze = Conv2dBlk(in_channels, squeeze_planes, kernel_size=1, stride=1, padding=0, bn=False)
+        self.squeeze_deconv = Deconv2dBlk(squeeze_planes, squeeze_planes, (ksize_h, ksize_w),
+                                          (factors[0], factors[1]), padding)
+        self.expand1x1 = Conv2dBlk(squeeze_planes, expand1x1_planes, 1, (1, 1), 0, bn=False)
+        self.expand3x3 = Conv2dBlk(squeeze_planes, expand3x3_planes, 3, (1, 1), 1, bn=False)
 
     def forward(self, x):
         x = self.squeeze(x)
@@ -170,19 +196,49 @@ class FireDeconv(nn.Module):
 class SELayer(nn.Module):
     """Squeeze and Excitation layer from SEnet
     """
-    def __init__(self, in_features, ratio=16):
+    def __init__(self, in_features, reduction=16):
         super(SELayer, self).__init__()
-
-        h_features = int(in_features / ratio)
-        self.fc1 = nn.Linear(in_features, h_features)
-        self.fc2 = nn.Linear(h_features, in_features)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_features, in_features // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features // reduction, in_features, bias=False),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        z = F.adaptive_avg_pool2d(x, 1).squeeze()
-        s = self.fc1(z)
-        s = torch.relu(s)
-        s = self.fc2(s)
-        s = torch.sigmoid(s)
-        s = s.view(-1, z.size()[-1], 1,1)
-        x_scaled = x * s
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        x_scaled = x * y.expand_as(x)
         return x_scaled
+
+
+def init_bilinear(tensor):
+    """Reset the weight and bias."""
+    nn.init.constant_(tensor, 0)
+    in_feat, out_feat, h, w = tensor.shape
+
+    assert h == 1, 'Now only support size_h=1'
+    assert in_feat == out_feat, \
+        'In bilinear interporlation mode, input channel size and output' \
+        'filter size should be the same'
+    factor_w = (w + 1) // 2
+
+    if w % 2 == 1:
+        center_w = factor_w - 1
+    else:
+        center_w = factor_w - 0.5
+
+    og_w = torch.reshape(torch.arange(w), (h, -1))
+    up_kernel = (1 - torch.abs(og_w - center_w) / factor_w)
+    for c in range(in_feat):
+        tensor.data[c, c, :, :] = up_kernel
+
+
+init_methods = {
+    'xavier-normal': nn.init.xavier_normal_,
+    'xavier-uniform': nn.init.xavier_uniform_,
+    'kaiming': nn.init.kaiming_normal_,
+    'bilinear': init_bilinear,
+}
