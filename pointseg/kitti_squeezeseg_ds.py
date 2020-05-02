@@ -2,7 +2,7 @@
 import os
 
 import numpy as np
-
+import torch
 
 from torch.utils.data import Dataset
 
@@ -55,7 +55,10 @@ class KittiSqueezeSegDS(Dataset):
         lidar_mask = lidar_all_channels[6]
         lidar_wights = lidar_all_channels[7]
 
+        xyz = np.ascontiguousarray(lidar_data[:, :, :3])
+
         return (lidar_inputs,
                 lidar_mask,
                 lidar_label,
-                lidar_wights)
+                lidar_wights,
+                xyz)

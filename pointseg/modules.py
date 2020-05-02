@@ -62,8 +62,8 @@ class ASPP(nn.Module):
 class BaseBlk(nn.Module):
     def __init__(self, init='kaiming'):
         super(BaseBlk, self).__init__()
-
         self.init = init
+        self.reset_parameters()
 
     def reset_parameters(self):
         for module in self.modules():
@@ -76,118 +76,108 @@ class BaseBlk(nn.Module):
             return
 
         init_method = init_methods[self.init]
-        init_method(module.weight)
-        if module.bias is not None:
-            torch.nn.init.zeros_(module.bias)
+
+        if self.init == "bilinear" and isinstance(module, nn.ConvTranspose2d):
+            init_method(module.weight)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
 
 
-class Conv2dBlk(BaseBlk):
-    """A 2D Convolution Block"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0,
-                 activation='relu', bn=True, init='xavier-normal',**kwargs):
-        super(Conv2dBlk, self).__init__(init)
-
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
-
-        self.bn = None
-        if bn:
-            self.bn = nn.BatchNorm2d(out_channels)
-
-        self.activation = None
-        if activation:
-            if activation.lower() == 'relu':
-                self.activation = nn.ReLU(inplace=True)
-            elif activation.lower() == 'elu':
-                alpha = kwargs.get('alpha', 1.)
-                self.activation = nn.ELU(alpha, alpha, inplace=True)
-            elif activation.lower() == 'leakrelu':
-                negative_slope = kwargs.get('negative_slope', 0.01)
-                self.activation = nn.LeakyReLU(negative_slope=negative_slope, inplace=True)
-        self.reset_parameters()
-
-    def forward(self, x):
-        x = self.conv(x)
-
-        if self.bn is not None:
-            x = self.bn(x)
-
-        if self.activation is not None:
-            x = self.activation(x)
-        return x
-
-
-class Deconv2dBlk(BaseBlk):
-    """ A 2D Deconvolution Block"""
-    def __init__( self, in_channels, out_channels, kernel_size, stride, padding=0, activation='relu', init='kaiming', **kwargs):
-        super(Deconv2dBlk, self).__init__(init)
-
-        self.deconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
-
-        if activation == 'relu':
-            self.activation = nn.ReLU(inplace=True)
-        elif activation.lower() == 'elu':
-            alpha = kwargs.get('alpha', 1.)
-            self.activation = nn.ELU(alpha, alpha, inplace=True)
-        elif activation.lower() == 'leakrelu':
-            negative_slope = kwargs.get('negative_slope', 0.01)
-            self.activation = nn.LeakyReLU(negative_slope=negative_slope, inplace=True)
-        else:
-            self.activation = None
-        self.reset_parameters()
-
-    def forward(self, x):
-        x = self.deconv(x)
-        if self.activation:
-            x = self.activation(x)
-        return x
-
-
-class Fire(nn.Module):
+class Fire(BaseBlk):
     def __init__(self, inplanes, squeeze_planes,
-                 expand1x1_planes, expand3x3_planes):
-        super(Fire, self).__init__()
+                 expand1x1_planes, expand3x3_planes, bn=True, bn_d=0.1, init='kaiming'):
+        super(Fire, self).__init__(init)
         self.inplanes = inplanes
+        self.bn = bn
 
-        self.squeeze = Conv2dBlk(inplanes, squeeze_planes, kernel_size=1, stride=1, bn=False)
-        self.expand1x1 = Conv2dBlk(squeeze_planes, expand1x1_planes, kernel_size=1, stride=1, bn=False)
-        self.expand3x3 = Conv2dBlk(squeeze_planes, expand3x3_planes, kernel_size=3, padding=1, stride=1, bn=False)
+        self.activation = nn.ReLU(inplace=True)
+
+        self.squeeze = nn.Conv2d(inplanes, squeeze_planes, kernel_size=1)
+        if self.bn:
+            self.squeeze_bn = nn.BatchNorm2d(squeeze_planes, momentum=bn_d)
+
+        self.expand1x1 = nn.Conv2d(squeeze_planes, expand1x1_planes, kernel_size=1)
+        if self.bn:
+            self.expand1x1_bn = nn.BatchNorm2d(expand1x1_planes, momentum=bn_d)
+
+        self.expand3x3 = nn.Conv2d(squeeze_planes, expand3x3_planes, kernel_size=3, padding=1)
+        if self.bn:
+            self.expand3x3_bn = nn.BatchNorm2d(expand3x3_planes, momentum=bn_d)
+        self.reset_parameters()
 
     def forward(self, x):
         x = self.squeeze(x)
+        if self.bn:
+            x = self.squeeze_bn(x)
+        x = self.activation(x)
+
         x_1x1 = self.expand1x1(x)
+        if self.bn:
+            x_1x1 = self.expand1x1_bn(x_1x1)
+        x_1x1 = self.activation(x_1x1)
+
         x_3x3 = self.expand3x3(x)
+        if self.bn:
+            x_3x3 = self.expand3x3_bn(x_3x3)
+        x_3x3 = self.activation(x_3x3)
+
         out = torch.cat([x_1x1, x_3x3], 1)
         return out
 
 
-class FireDeconv(nn.Module):
+class FireDeconv(BaseBlk):
     """Fire deconvolution layer constructor.
     Args:
       inputs: input channels
       squeeze_planes: number of 1x1 filters in squeeze layer.
       expand1x1_planes: number of 1x1 filters in expand layer.
       expand3x3_planes: number of 3x3 filters in expand layer.
-      factors: spatial upsampling factors.[1,2]
+      stride: spatial upsampling factors.[1,2]
     Returns:
       fire deconv layer operation.
     """
+    def __init__(self, inplanes, squeeze_planes, expand1x1_planes, expand3x3_planes,
+                 stride=(1, 2), padding=(0, 1), bn=True, bn_d=0.1, init='kaiming'):
+        super(FireDeconv, self).__init__(init)
+        self.bn = bn
 
-    def __init__(self, in_channels,  squeeze_planes, expand1x1_planes, expand3x3_planes, factors=[1, 2], padding=(0, 1)):
-        super(FireDeconv, self).__init__()
-        ksize_h = factors[0] * 2 - factors[0] % 2
-        ksize_w = factors[1] * 2 - factors[1] % 2
+        self.activation = nn.ReLU(inplace=True)
 
-        self.squeeze = Conv2dBlk(in_channels, squeeze_planes, kernel_size=1, stride=1, padding=0, bn=False)
-        self.squeeze_deconv = Deconv2dBlk(squeeze_planes, squeeze_planes, (ksize_h, ksize_w),
-                                          (factors[0], factors[1]), padding)
-        self.expand1x1 = Conv2dBlk(squeeze_planes, expand1x1_planes, 1, (1, 1), 0, bn=False)
-        self.expand3x3 = Conv2dBlk(squeeze_planes, expand3x3_planes, 3, (1, 1), 1, bn=False)
+        self.squeeze = nn.Conv2d(inplanes, squeeze_planes, kernel_size=1)
+        if self.bn:
+            self.squeeze_bn = nn.BatchNorm2d(squeeze_planes, momentum=bn_d)
+
+        # upsampling
+        self.squeeze_deconv = nn.ConvTranspose2d(squeeze_planes, squeeze_planes,
+                                                 kernel_size=(1, 4),
+                                                 stride=stride, padding=padding)
+
+        self.expand1x1 = nn.Conv2d(squeeze_planes, expand1x1_planes, kernel_size=1)
+        if self.bn:
+            self.expand1x1_bn = nn.BatchNorm2d(expand1x1_planes, momentum=bn_d)
+
+        self.expand3x3 = nn.Conv2d(squeeze_planes, expand3x3_planes, kernel_size=3, padding=1)
+        if self.bn:
+            self.expand3x3_bn = nn.BatchNorm2d(expand3x3_planes, momentum=bn_d)
+        self.reset_parameters()
 
     def forward(self, x):
         x = self.squeeze(x)
-        x = self.squeeze_deconv(x)
+        if self.bn:
+            x = self.squeeze_bn(x)
+        x = self.activation(x)
+
+        x = self.activation(self.squeeze_deconv(x))
+
         x_1x1 = self.expand1x1(x)
+        if self.bn:
+            x_1x1 = self.expand1x1_bn(x_1x1)
+        x_1x1 = self.activation(x_1x1)
+
         x_3x3 = self.expand3x3(x)
+        if self.bn:
+            x_3x3 = self.expand3x3_bn(x_3x3)
+        x_3x3 = self.activation(x_3x3)
 
         out = torch.cat([x_1x1, x_3x3], 1)
         return out

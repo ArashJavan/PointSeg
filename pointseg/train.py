@@ -10,6 +10,7 @@ import datetime
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
@@ -23,10 +24,9 @@ sys.path.append(content_dir)
 
 from pointseg.pointseg_net import PointSegNet
 from pointseg.kitti_squeezeseg_ds import KittiSqueezeSegDS
-from pointseg.loss import WeightedCrossEntropy, cal_eval_metrics
-from pointseg.utils import img_normalize, visualize_seg
+from pointseg.utils import img_normalize, visualize_seg, cal_eval_metrics
 
-from pytorch_model_summary import summary
+#from pytorch_model_summary import summary
 
 VERSION_MAJOR = 0
 VERSION_MINOR = 1
@@ -59,15 +59,16 @@ def main_worker(args):
     content_dir = os.path.abspath("{}/..".format(dname))
 
     input_shape = cfg['input-shape']
+    cls_weights = torch.tensor(cfg['class-weights'])
     mean = cfg['mean']
     std = cfg['std']
 
-    model = PointSegNet(cfg, bypass=False)
+    model = PointSegNet(cfg)
     model.to(args.device)
 
-    criterion = WeightedCrossEntropy(cfg)
+    criterion = nn.CrossEntropyLoss(weight=cls_weights).to(args.device)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -85,7 +86,6 @@ def main_worker(args):
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
-
     cudnn.benchmark = True
 
     trans = transforms.Compose((transforms.ToTensor(), transforms.Normalize(mean, std)))
@@ -94,28 +94,25 @@ def main_worker(args):
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                    num_workers=args.workers, shuffle=True)
 
-
     val_dataset = KittiSqueezeSegDS(cfg, args.data_path, args.csv_path, transform=trans, mode="val")
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size,
                                                    num_workers=args.workers, shuffle=False)
 
     writer = SummaryWriter()
-    input = torch.rand((1, input_shape[2], input_shape[0], input_shape[1])).to(args.device)
-    print(summary(model, input))
-    writer.add_graph(model, input)
+    #input = torch.rand((1, input_shape[2], input_shape[0], input_shape[1])).to(args.device)
+    #print(summary(model, input))
+    #writer.add_graph(model, input)
 
     print("Starting PointSeg v{}.{}.{}".format(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH))
 
     if args.evaluate:
-        validate(val_dataloader, model, criterion, args)
+        validate(val_dataloader, model, criterion, 0, args, cfg)
         return
 
     print("Starting trainig")
     print("lr: {}, batch-size: {}, num-workers: {}".format(args.lr, args.batch_size, args.workers))
 
     for epoch in range(args.start_epoch, args.epochs):
-        # lr = adjust_learning_rate(optimizer, epoch, args)
-
         # train for one epoch
         train(train_dataloader, model, criterion, optimizer, epoch, args)
 
@@ -137,8 +134,9 @@ def main_worker(args):
         }, is_best, fname)
 
         lr_scheduler.step(epoch)
+
         # recore learning rate changes
-        writer.add_scalar("LR", lr_scheduler.get_lr()[0], epoch)
+        writer.add_scalar("LR", lr_scheduler.get_last_lr(), epoch)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -150,6 +148,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         [batch_time, data_time, losses],
         prefix="Epoch: [{}]".format(epoch))
 
+    # empty the cache for training
+    if args.device == 'cuda':
+        torch.cuda.empty_cache()
+
     # switch to train mode
     model.train()
 
@@ -158,12 +160,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        inputs, mask, labels, weights = data
+        inputs, mask, labels, weights, _ = data
         inputs, mask, labels, weights = \
                 inputs.to(args.device), mask.to(args.device), labels.to(args.device), weights.to(args.device)
 
         outputs = model(inputs)
-        loss = criterion(outputs, labels, mask, weights)
+        loss = criterion(outputs.clamp(min=1e-8), labels) # criterion(outputs, labels, mask, weights)
 
         _, preds = torch.max(outputs.detach().data, 1)
 
@@ -187,22 +189,23 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
             # Tensoorboard Save Input Image and Visualized Segmentation
             writer.add_image('Input/Image/', (img_normalize(inputs[0, 3, :, :])).cpu(), step_val)
-
             writer.add_image('Predict/Image/', visualize_seg(preds, cfg)[0], step_val)
-
             writer.add_image('Target/Image/', visualize_seg(labels, cfg)[0], step_val)
 
 
-def validate(val_loader, model, criterion, epoch, args):
+def validate(val_loader, model, criterion, epoch, args, cfg):
     batch_time = AverageMeter('Time', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
-    iou = AverageMeter('iou', ':.4e')
-    precision = AverageMeter('prec', ':.4e')
-    recall = AverageMeter('recall', ':.4e')
+    losses = AverageMeter('Loss', ':.2e')
+
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, iou, precision, recall],
+        [batch_time, losses],
         prefix='Test: ')
+
+    n_classes = len(cfg['classes'])
+    total_tp = torch.zeros(n_classes)
+    total_fp = torch.zeros(n_classes)
+    total_fn = torch.zeros(n_classes)
 
     # switch to evaluate mode
     model.eval()
@@ -210,28 +213,25 @@ def validate(val_loader, model, criterion, epoch, args):
     with torch.no_grad():
         end = time.time()
         for i, data in enumerate(val_loader, 1):
-            inputs, mask, labels, weights = data
+            inputs, mask, labels, weights, _ = data
             inputs, mask, labels, weights = \
                 inputs.to(args.device), mask.to(args.device), labels.to(args.device), weights.to(args.device)
 
             # compute output
             outputs = model(inputs)
-            loss = criterion(outputs, labels, mask, weights)
+            loss = criterion(torch.log(outputs.clamp(min=1e-8)), labels)
 
             # measure accuracy and record loss
             _, predicted = torch.max(outputs.data, 1)
 
-            n_classes = inputs.size(1)
+            n_classes = outputs.size(1)
             tp, fp, fn = cal_eval_metrics(labels, predicted, n_classes)
 
-            iou_i = tp / (tp + fn + fp + 1e-6)
-            precision_i = tp / (tp + fp + 1e-6)
-            reccall_i = tp / (tp + fn + 1e-6)
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
 
             losses.update(loss.item(), inputs.size(0))
-            iou.update(iou_i.mean().item(), 1)
-            precision.update(precision_i.mean().item(), 1)
-            recall.update(reccall_i.mean().item(), 1)
 
             # Record loss
             step_val = epoch * len(val_loader) + i
@@ -243,22 +243,23 @@ def validate(val_loader, model, criterion, epoch, args):
 
             if i % args.print_freq == 0:
                 progress.display(i)
-    return iou.avg
+
+    iou = total_tp / (total_tp + total_fn + total_fp + 1e-6)
+    precision = total_tp / (total_tp + total_fp + 1e-6)
+    recall = total_tp / (total_tp + total_fn + 1e-6)
+
+    print("Averege over whole validation set:")
+    print("IOU-car: {:.3}, Precision-car: {:.3}, Recall-car: {:.3}".format(iou[1], precision[1], recall[1]))
+    print("IOU-ped: {:.3}, Precision-ped: {:.3}, Recall-ped: {:.3}".format(iou[2], precision[2], recall[2]))
+    print("IOU-cyc: {:.3}, Precision-cyc: {:.3}, Recall-cyc: {:.3}".format(iou[3], precision[3], recall[3]))
+
+    return iou.mean()
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, '{}/model_best.tar'.format(os.path.dirname(filename)))
-
-
-def adjust_learning_rate(optimizer, epoch, args):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = max(args.lr * (0.1 ** (epoch // 20)), 1e-6)
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    return lr
 
 
 class AverageMeter(object):
@@ -309,12 +310,12 @@ cfg = None
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Pytorch PointSeg Training')
 
-    parser.add_argument('--csv-path',  type=str, help='path to csv file', metavar='PATH')
-    parser.add_argument('--data-path', type=str, help='path to lidar data', metavar='PATH')
+    parser.add_argument('--csv-path', required=True, type=str, help='path to csv file', metavar='PATH')
+    parser.add_argument('--data-path', required=True, type=str, help='path to lidar data', metavar='PATH')
     parser.add_argument('-c', '--config', default='../config.yaml', type=str, help='path to config file')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('--epochs', default=30, type=int, metavar='N',
+    parser.add_argument('--epochs', default=1, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='manual epoch number (useful on restarts)')
@@ -344,6 +345,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
-
-torch.optim.lr_scheduler.ExponentialLR
