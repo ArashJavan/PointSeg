@@ -68,7 +68,7 @@ def main_worker(args):
 
     criterion = nn.CrossEntropyLoss(weight=cls_weights).to(args.device)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -117,7 +117,7 @@ def main_worker(args):
         train(train_dataloader, model, criterion, optimizer, epoch, args)
 
         # evaluate on validation set
-        acc = validate(val_dataloader, model, criterion, epoch, args)
+        acc = validate(val_dataloader, model, criterion, epoch, args, cfg)
 
         # evaluate on validation set
         is_best = acc > best_acc
@@ -133,10 +133,10 @@ def main_worker(args):
             'optimizer': optimizer.state_dict(),
         }, is_best, fname)
 
-        lr_scheduler.step(epoch)
+        lr_scheduler.step()
 
         # recore learning rate changes
-        writer.add_scalar("LR", lr_scheduler.get_last_lr(), epoch)
+        writer.add_scalar("LR", lr_scheduler.get_last_lr()[0], epoch)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):

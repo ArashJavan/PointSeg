@@ -152,7 +152,7 @@ def test(dataloader, model, criterion, args):
 
             # add the predictions to input channels and save them
             if args.save:
-                for j in range(args.batch_size):
+                for j in range(xyz.size(0)):
                     in_channel = xyz[j].detach().cpu().numpy()
                     preds_j = preds[j].detach().cpu().numpy()
                     labels_gt = labels[j].detach().cpu().numpy()
