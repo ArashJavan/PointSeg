@@ -21,9 +21,7 @@ The dataset used for training PointSeg is the same as [squeezeseg](https://githu
 [here](https://www.dropbox.com/s/pnzgcitvppmwfuf/lidar_2d.tgz?dl=0).
 
 ## Results
-![pointseg](resources/20_1.png)
-![pointseg](resources/38_1.png)
-![pointseg](resources/39_1.png)
+![pointseg](resources/res.png)
 
 ## Usage 
 
