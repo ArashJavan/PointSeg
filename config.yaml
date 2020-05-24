@@ -5,7 +5,8 @@ class-cmap: [[0., 0., 0.],
              [0., 0., 0.9],
              [0., 0.9, 0.],
              [0.9, 0., 0.]]
-
+dropout: 0.25
+bypass: true
 azimuth-level: 512
 zenith-level: 64
 data-augmentation: true
