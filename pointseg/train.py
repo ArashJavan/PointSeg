@@ -29,7 +29,7 @@ from pointseg.utils import img_normalize, visualize_seg, cal_eval_metrics
 #from pytorch_model_summary import summary
 
 VERSION_MAJOR = 0
-VERSION_MINOR = 2
+VERSION_MINOR = 3
 VERSION_PATCH = 0
 
 
