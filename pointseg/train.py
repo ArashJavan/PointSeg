@@ -161,11 +161,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         data_time.update(time.time() - end)
 
         inputs, mask, labels, weights, _ = data
+        inputs = inputs[:, 3:, :, :].contiguous()
+
         inputs, mask, labels, weights = \
                 inputs.to(args.device), mask.to(args.device), labels.to(args.device), weights.to(args.device)
 
         outputs = model(inputs)
         loss = criterion(outputs.clamp(min=1e-8), labels) # criterion(outputs, labels, mask, weights)
+
 
         _, preds = torch.max(outputs.detach().data, 1)
 
@@ -188,7 +191,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             writer.add_scalar("Train/Loss", losses.avg, step_val)
 
             # Tensoorboard Save Input Image and Visualized Segmentation
-            writer.add_image('Input/Image/', (img_normalize(inputs[0, 3, :, :])).cpu(), step_val)
+            writer.add_image('Input/Image/', (img_normalize(inputs[0, 0, :, :])).cpu(), step_val)
             writer.add_image('Predict/Image/', visualize_seg(preds, cfg)[0], step_val)
             writer.add_image('Target/Image/', visualize_seg(labels, cfg)[0], step_val)
 
@@ -249,9 +252,7 @@ def validate(val_loader, model, criterion, epoch, args, cfg):
     recall = total_tp / (total_tp + total_fn + 1e-6)
 
     print("Averege over whole validation set:")
-    print("IOU-car: {:.3}, Precision-car: {:.3}, Recall-car: {:.3}".format(iou[1], precision[1], recall[1]))
-    print("IOU-ped: {:.3}, Precision-ped: {:.3}, Recall-ped: {:.3}".format(iou[2], precision[2], recall[2]))
-    print("IOU-cyc: {:.3}, Precision-cyc: {:.3}, Recall-cyc: {:.3}".format(iou[3], precision[3], recall[3]))
+    print("IOU-object: {:.3}, Precision-object: {:.3}, Recall-object: {:.3}".format(iou[1], precision[1], recall[1]))
 
     return iou.mean()
 

@@ -40,13 +40,13 @@ class KittiSqueezeSegDS(Dataset):
 
         lidar_mask = (lidar_data[:, :, 4] > 0) * 1
 
-        lidar_label = lidar_data[:, :, 5]
+        lidar_label = (lidar_data[:, :, 5] > 0) * 1
         weights = np.zeros(lidar_label.shape)
         for l in range(self.num_classes):
             weights[lidar_label == l] = self.class_weights[int(l)]
 
         # x, y, z, intensity, range, label
-        lidar_all_channels = np.dstack((lidar_data, lidar_mask, weights))
+        lidar_all_channels = np.dstack((lidar_data[:, :, 0:5], lidar_label, lidar_mask, weights))
         if self.transform:
             lidar_all_channels = self.transform(lidar_all_channels).float()
 
