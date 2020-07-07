@@ -125,7 +125,14 @@ def main_worker(args):
 
         chk_path = Path(os.path.join(content_dir, "checkpoints"))
         chk_path.mkdir(parents=True, exist_ok=True)
-        fname = "{}/checkpoint_{}_{}.tar".format(str(chk_path), epoch, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        modules = model.get_modules()
+        for module in modules:
+            fname = "{}/checkpoint_{}.tar".format(str(chk_path), module.name)
+            save_checkpoint({
+                'state_dict': module.state_dict(),
+            }, is_best, fname)
+
+        fname = "{}/checkpoint_{}.tar".format(str(chk_path), model.name)
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
